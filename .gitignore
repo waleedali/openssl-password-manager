@@ -1,0 +1,8 @@
+Debug/
+ipch/
+openssl-password-manager.opensdf
+openssl-password-manager.sdf
+openssl-password-manager/Debug
+openssl-password-manager/openssl-password-manager.vcxproj.filters
+openssl-password-manager/openssl-password-manager.vcxproj.user
+openssl-password-manager/ReadMe.txt
