@@ -7,3 +7,4 @@ openssl-password-manager/Debug
 openssl-password-manager/openssl-password-manager.vcxproj.filters
 openssl-password-manager/openssl-password-manager.vcxproj.user
 openssl-password-manager/ReadMe.txt
+openssl-password-manager/secureduserdata.dat
