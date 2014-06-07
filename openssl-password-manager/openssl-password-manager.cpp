@@ -11,9 +11,11 @@
 #include <sstream>
 #include <vector>
 #include <map>
+#include <algorithm>
 #include <Windows.h>
 #include <openssl/aes.h>
 #include <openssl/evp.h>
+#include <openssl/rand.h>
 
 using namespace std;
 
@@ -29,7 +31,7 @@ typedef enum _operation_modes {
 	CBC
 } OPERATION_MODES;
 
-static unsigned int op_mode = ECB;
+static unsigned int op_mode = CBC;
 
 typedef struct _user_data {
 	unsigned int operationmode;
@@ -37,7 +39,7 @@ typedef struct _user_data {
 } USER_DATA;
 
 /**
- * Create an 256 bit key and IV using the supplied key_data. salt can be added for taste.
+ * Create the key and IV using the supplied key_data. 
  * Fills in the encryption and decryption ctx objects and returns 0 on success
  **/
 int aes_init(const unsigned char *key_data, int key_data_len, unsigned char *salt, EVP_CIPHER_CTX *e_ctx, 
@@ -46,15 +48,7 @@ int aes_init(const unsigned char *key_data, int key_data_len, unsigned char *sal
 	int i, nrounds = 5;
 	unsigned char key[32];
   
-	/*
-	* Gen key & IV for AES. A SHA1 digest is used to hash the supplied key material.
-	* nrounds is the number of times the we hash the material. 
-	*/
-	i = EVP_BytesToKey(EVP_aes_256_cbc(), EVP_sha1(), salt, key_data, key_data_len, nrounds, key, iv);
-	if (i != 32) {
-	printf("Key size is %d bits - should be 256 bits\n", i);
-	return -1;
-	}
+	RAND_bytes(iv, 32);
 
 	EVP_CIPHER_CTX_init(e_ctx);
 	EVP_CIPHER_CTX_init(d_ctx);
@@ -62,14 +56,21 @@ int aes_init(const unsigned char *key_data, int key_data_len, unsigned char *sal
 	switch (operation_mode)
 	{
 	case ECB:
+		/*
+		* Gen key & IV for AES. A SHA1 digest is used to hash the supplied key material.
+		* nrounds is the number of times the we hash the material. 
+		*/
+		EVP_BytesToKey(EVP_aes_128_ecb(), EVP_sha1(), salt, key_data, key_data_len, nrounds, key, NULL);
 		EVP_EncryptInit_ex(e_ctx, EVP_aes_128_ecb(), NULL, key, NULL);
 		EVP_DecryptInit_ex(d_ctx, EVP_aes_128_ecb(), NULL, key, NULL);
 		break;
 	case CTR:
-		EVP_EncryptInit_ex(e_ctx, EVP_aes_128_ctr(), NULL, key, iv);
-		EVP_DecryptInit_ex(d_ctx, EVP_aes_128_ctr(), NULL, key, iv);
+		EVP_BytesToKey(EVP_aes_128_ctr(), EVP_sha1(), salt, key_data, key_data_len, nrounds, key, NULL);
+		EVP_EncryptInit_ex(e_ctx, EVP_aes_128_ctr(), NULL, key, NULL);
+		EVP_DecryptInit_ex(d_ctx, EVP_aes_128_ctr(), NULL, key, NULL);
 		break;
 	case CBC:
+		EVP_BytesToKey(EVP_aes_256_cbc(), EVP_sha1(), salt, key_data, key_data_len, nrounds, key, NULL);
 		EVP_EncryptInit_ex(e_ctx, EVP_aes_256_cbc(), NULL, key, iv);
 		EVP_DecryptInit_ex(d_ctx, EVP_aes_256_cbc(), NULL, key, iv);
 		break;
@@ -122,7 +123,6 @@ unsigned char *aes_decrypt(EVP_CIPHER_CTX *e, unsigned char *ciphertext, int *le
   return plaintext;
 }
 
-
 string GetCurrentOpMode(){
 	if (ECB == op_mode)
 		return "ECB";
@@ -174,6 +174,45 @@ vector<string> split(const string &s, char delim) {
     return elems;
 }
 
+std::string string_to_hex(const std::string& input)
+{
+    static const char* const lut = "0123456789ABCDEF";
+    size_t len = input.length();
+
+    std::string output;
+    output.reserve(2 * len);
+    for (size_t i = 0; i < len; ++i)
+    {
+        const unsigned char c = input[i];
+        output.push_back(lut[c >> 4]);
+        output.push_back(lut[c & 15]);
+    }
+    return output;
+}
+
+std::string hex_to_string(const std::string& input)
+{
+    static const char* const lut = "0123456789ABCDEF";
+    size_t len = input.length();
+    if (len & 1) throw std::invalid_argument("odd length");
+
+    std::string output;
+    output.reserve(len / 2);
+    for (size_t i = 0; i < len; i += 2)
+    {
+        char a = input[i];
+        const char* p = std::lower_bound(lut, lut + 16, a);
+        if (*p != a) throw std::invalid_argument("not a hex digit");
+
+        char b = input[i + 1];
+        const char* q = std::lower_bound(lut, lut + 16, b);
+        if (*q != b) throw std::invalid_argument("not a hex digit");
+
+        output.push_back(((p - lut) << 4) | (q - lut));
+    }
+    return output;
+}
+
 int ReadAndProcessFile(const string &username, const string &password)
 {
 	string line;
@@ -181,9 +220,8 @@ int ReadAndProcessFile(const string &username, const string &password)
 	ifstream myfile ("secureduserdata.dat");
 	if (myfile.is_open())
 	{
-		while (getline (myfile,line))
+		while (getline (myfile, line))
 		{
-			//cout << line << '\n';
 			vector<string> data = split(line, ';');
 			if(data.size() != 3 || atoi(data[0].c_str()) > CBC)
 				continue;
@@ -198,7 +236,7 @@ int ReadAndProcessFile(const string &username, const string &password)
 	map<string, USER_DATA>::iterator it = user_data_map.find(username);
 	if (it == user_data_map.end())
 	{
-		cout << "\nusername not found.\n";
+		cout << "\nUsername not found.\n";
 		return 0;
 	}
 
@@ -206,28 +244,47 @@ int ReadAndProcessFile(const string &username, const string &password)
 		status of enc/dec operations */
 	EVP_CIPHER_CTX en, de;
 
-	/* 8 bytes to salt the key_data during key generation. This is an example of
-		compiled in salt. We just read the bit pattern created by these two 4 byte 
-		integers on the stack as 64 bits of contigous salt material - 
-		ofcourse this only works if sizeof(int) >= 4 */
 	unsigned int salt[] = {12345, 54321};
 	unsigned char *iv = (unsigned char *)malloc(32);
 
 	/* gen key and iv. init the cipher ctx object */
 	if (aes_init(key_data, 32, (unsigned char *)&salt, &en, &de, it->second.operationmode, iv)) {
-		printf("Couldn't initialize AES cipher\n");
+		cout << "Couldn't initialize AES cipher\n";
 		return -1;
 	}
 
-	//string cipher_str = it->second.encrypted_password.substr(33);
-	string cipher_str = it->second.encrypted_password;
+	// safety check to prevent any out of index exception
+	if (it->second.encrypted_password.size() < 32)
+	{
+		cout << "\nError: encrypted user data is corrupt.\n";
+		return 0;
+	}
+
+	string encrypted_password = hex_to_string(it->second.encrypted_password);
+	string iv_str = encrypted_password.substr(0, 32);
+	string cipher_str = encrypted_password.substr(32);
 	int len = cipher_str.size();
 	char *plaintext;
 	unsigned char *ciphertext = (unsigned char *)cipher_str.c_str(); 
+
+	/* in case of the CBC mode use the IV that's attached to the front of the ciphertext. */
+	if (CBC == it->second.operationmode)
+		EVP_DecryptInit_ex(&de, NULL, NULL, NULL, (unsigned char *)iv_str.c_str());
+
 	plaintext = (char *)aes_decrypt(&de, ciphertext, &len);
+
+	len = strlen(plaintext);
+	if (password.size() != len || strncmp(plaintext, password.c_str(), len))
+		cout << "\nIncorrect Password!\n";
+	else
+		cout << "\nValid username and password!\n";
 
 	free(plaintext);
 	free(iv);
+
+	EVP_CIPHER_CTX_cleanup(&en);
+	EVP_CIPHER_CTX_cleanup(&de);
+
 	return 0;
 }
 
@@ -235,18 +292,10 @@ int ProcessAndWriteToFile(const string &username, const string &password)
 {
 	ofstream output_file;
 
-
-	/*TODO: check if the username already exist in the file */
-
-
 	/* "opaque" encryption, decryption ctx structures that libcrypto uses to record
 		status of enc/dec operations */
 	EVP_CIPHER_CTX en, de;
 
-	/* 8 bytes to salt the key_data during key generation. This is an example of
-		compiled in salt. We just read the bit pattern created by these two 4 byte 
-		integers on the stack as 64 bits of contigous salt material - 
-		ofcourse this only works if sizeof(int) >= 4 */
 	unsigned int salt[] = {12345, 54321};
 	unsigned char *ciphertext;
 	unsigned char *iv = (unsigned char *)malloc(32);
@@ -254,7 +303,7 @@ int ProcessAndWriteToFile(const string &username, const string &password)
 
 	/* gen key and iv. init the cipher ctx object */
 	if (aes_init(key_data, 32, (unsigned char *)&salt, &en, &de, op_mode, iv)) {
-		printf("Couldn't initialize AES cipher\n");
+		cout << "Couldn't initialize AES cipher\n";
 		return -1;
 	}
 
@@ -263,15 +312,22 @@ int ProcessAndWriteToFile(const string &username, const string &password)
 	ciphertext = aes_encrypt(&en, (unsigned char *)password.c_str(), &len);
 
 	/* the file is stored in the formate of:
-	   operation_mode username encrypted_password */
+	   operation_mode;username;encrypted_password<newline>*/
 	output_file.open ("secureduserdata.dat", ios::out | ios::app);
-	string chipher_str((char*)ciphertext);
-	//output_file << endl << op_mode << ";" << username << ";" << iv << chipher_str;
-	output_file << endl << op_mode << ";" << username << ";" << chipher_str;
+	string cipher_str((char*)ciphertext);
+	string iv_str((char*)iv);
+	iv_str = iv_str.substr(0, 32);
+	output_file << op_mode << ";" << username << ";";
+	output_file << string_to_hex(iv_str + cipher_str) << endl;
 	output_file.close();
+
+	// cout << endl << strlen((char*)iv) << " " << strlen((char*)ciphertext) << " " << iv_str.size() << " "<< cipher_str.size() << endl;
 
 	free(ciphertext);
 	free(iv);
+
+	EVP_CIPHER_CTX_cleanup(&en);
+	EVP_CIPHER_CTX_cleanup(&de);
 
 	return 0;
 }
@@ -280,27 +336,22 @@ int _tmain(int argc, _TCHAR* argv[])
 {
 	string username, password;
 	char input_ch;
-	char currentmenu = '1';
 
-
-	string menu1 =  "Please select an option: \n" 
-		"1- Enter a new username an password \n"
-		"2- Verify the existance of a username and password \n"
-		"3- Change the AES operation mode (current: " + GetCurrentOpMode() + ") \n"
-		"4- Exit \n"
-		"Enter Selection: "; 
-
-	string menu2 = "\nPlease select the AES operation mode: \n"
+	string op_mode_menu = "\nPlease select the AES operation mode: \n"
 				"1- Electronic codebook (ECB) \n"
 				"2- Counter (CTR) \n"
 				"3- Cipher-block chaining (CBC)\n"
 				"4- Back \n"
 				"Enter Selection: ";
 
-	cout << menu1;
-
 	while (1)
 	{
+		cout << "\nPlease select and option: \n" 
+		"1- Enter a new username an password \n"
+		"2- Verify the existance of a username and password \n"
+		"3- Change the AES operation mode (current: " + GetCurrentOpMode() + ") \n"
+		"4- Exit \n"
+		"Enter Selection: ";
 		input_ch = _getche();
 
 		switch (input_ch)
@@ -309,6 +360,7 @@ int _tmain(int argc, _TCHAR* argv[])
 			/* get the username and password from the user */
 			cout << "\nEnter a username: ";
 			/* TODO: should be restricted to alphabet only to prevent injecting the ';' char */
+			/* TODO: check if the username already exists in the file */
 			getline(std::cin, username);
 			cout << "Enter a password: ";
 			SetStdinEcho(false);
@@ -331,7 +383,18 @@ int _tmain(int argc, _TCHAR* argv[])
 			ReadAndProcessFile(username, password);
 			break;
 		case '3':
-			cout << menu2;
+			cout << op_mode_menu;
+			input_ch = _getche();
+			if ('1' == input_ch)
+				op_mode = ECB;
+			else if ('2' == input_ch) 
+				op_mode = CTR;
+			else if ('3' == input_ch) 
+				op_mode = CBC;
+			else if ('4' == input_ch) 
+				;
+			else
+				cout << "\nInvalid input.\n";
 			break;
 		case '4':
 			return 0;
@@ -341,36 +404,6 @@ int _tmain(int argc, _TCHAR* argv[])
 		}
 	}
 
-
-
-
- // /* encrypt and decrypt each input string and compare with the original */
- // for (i = 0; input[i]; i++) {
- //   char *plaintext;
- //   unsigned char *ciphertext;
- //   int olen, len;
- //   
- //   /* The enc/dec functions deal with binary data and not C strings. strlen() will 
- //      return length of the string without counting the '\0' string marker. We always
- //      pass in the marker byte to the encrypt/decrypt functions so that after decryption 
- //      we end up with a legal C string */
- //   olen = len = strlen(input[i])+1;
- //   
- //   ciphertext = aes_encrypt(&en, (unsigned char *)input[i], &len);
-	//printf("ciphertext: %s", ciphertext);
- //   plaintext = (char *)aes_decrypt(&de, ciphertext, &len);
-
- //   if (strncmp(plaintext, input[i], olen)) 
- //     printf("FAIL: enc/dec failed for \"%s\"\n", input[i]);
- //   else 
- //     printf("OK: enc/dec ok for \"%s\"\n", plaintext);
- //   
- //   free(ciphertext);
- //   free(plaintext);
- // }
-
- // EVP_CIPHER_CTX_cleanup(&en);
- // EVP_CIPHER_CTX_cleanup(&de);
 
   return 0;
 }
